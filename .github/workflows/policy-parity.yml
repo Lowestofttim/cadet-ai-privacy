@@ -1,0 +1,163 @@
+# Keeps this repository a REDIRECT and nothing else (audit finding M-10).
+#
+# ⚠️ READ THIS BEFORE CHANGING ANYTHING HERE ⚠️
+#
+# index.html used to be a full second copy of the Cadet AI privacy policy, kept
+# in step with the website and the app by hand, on the strength of one sentence
+# of prose in the README. Nothing enforced it. It drifted, and the two published
+# copies ended up contradicting each other on who the data controller is, on
+# whether a parent can get an under-13 an account, on how long TANGO chat is
+# kept, and on which provider synthesises the voice.
+#
+# The users of this policy are children. Two published policies that disagree is
+# not untidy docs — it is two competing normative texts, either of which a
+# cadet, a parent, the ICO or a Play reviewer could reasonably treat as binding.
+#
+# There is now ONE policy, at https://cadetai.co.uk/privacy.html, and this repo
+# redirects to it. This workflow is what stops the copy coming back: it fails if
+# index.html regains policy prose, loses the canonical URL, or loses either half
+# of the redirect (the meta refresh for browsers, the visible link for crawlers
+# and for anyone whose browser does not act on it).
+#
+# GitHub Pages publishes whatever lands on the default branch, immediately.
+# There is no build step and no staging, so this workflow is the only check that
+# runs before the public page changes. Do not add `continue-on-error`, and do
+# not delete a step to make a PR go green. If a check is wrong, fix the check.
+#
+# Deliberately hermetic: no secrets, no network, no package manager, and — apart
+# from stripping HTML comments — no external commands at all. Every assertion is
+# a bash string test against a file in this checkout.
+
+name: Policy parity
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: policy-parity-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  redirect-only:
+    name: index.html is a redirect, not a policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Assert index.html is still only a redirect
+        run: |
+          set -euo pipefail
+
+          CANONICAL='https://cadetai.co.uk/privacy.html'
+          FILE='index.html'
+
+          FAILED=0
+          fail() { echo "::error file=${FILE}::$1"; FAILED=1; }
+
+          # ── 1. Size cap ────────────────────────────────────────────────────
+          # A redirect page is small. Policy prose is not. This is a blunt
+          # instrument on purpose: it catches a re-added policy even if it is
+          # worded in a way none of the keyword checks below expect. The page is
+          # ~1.9 kB today; 6144 bytes leaves generous room for styling or wording
+          # changes and still cannot hide a policy.
+          BYTES=$(wc -c < "$FILE")
+          echo "index.html is ${BYTES} bytes"
+          if [ "$BYTES" -gt 6144 ]; then
+            fail "index.html is ${BYTES} bytes (limit 6144). This repo is a redirect to ${CANONICAL}; the policy itself belongs in the website repo."
+          fi
+
+          # ── The text under test ────────────────────────────────────────────
+          # HTML comments are stripped first. A comment is not published text: a
+          # redirect commented out is not a redirect, and prose in a comment is
+          # not a competing policy. It also lets the warning comment at the top
+          # of index.html name plainly which clauses drifted, which is the whole
+          # reason that warning is worth having.
+          #
+          # Then lower-cased once, so every check below is a plain
+          # case-insensitive substring or ERE test with no `grep` involved. That
+          # is deliberate: a piped `grep -q` under `pipefail` can report 141
+          # (grep exits on first match, the writer takes SIGPIPE, pipefail
+          # surfaces the writer's status), which would silently invert these
+          # assertions on larger inputs. Pure bash has no such edge.
+          RENDERED=$(perl -0777 -pe 's/<!--.*?-->//gs' "$FILE")
+          TEXT=${RENDERED,,}
+
+          has_re() { [[ $TEXT =~ $1 ]]; }
+          has_str() { [[ $TEXT == *"${1,,}"* ]]; }
+
+          # ── 2. Both halves of the redirect must survive ────────────────────
+          # The meta refresh serves browsers; the visible link serves crawlers,
+          # link checkers, and any reader whose browser does not act on the
+          # refresh. Losing either one strands people on a page with no policy.
+          has_re '<meta[^>]+http-equiv=["'"'"']?refresh[^>]+cadetai\.co\.uk/privacy\.html' \
+            || fail "missing the <meta http-equiv=\"refresh\"> to ${CANONICAL}"
+          has_re '<a[^>]+href=["'"'"']?https://cadetai\.co\.uk/privacy\.html' \
+            || fail "missing the visible <a href> fallback to ${CANONICAL} (needed without JS and for crawlers)"
+          has_re '<link[^>]+rel=["'"'"']?canonical["'"'"']?[^>]+cadetai\.co\.uk/privacy\.html' \
+            || fail "missing <link rel=\"canonical\"> pointing at ${CANONICAL}"
+
+          # ── 3. No policy prose ─────────────────────────────────────────────
+          # These are the section headings and legal phrases the deleted copy
+          # carried. Any one of them reappearing means this page is trying to be
+          # a policy again.
+          while IFS= read -r phrase; do
+            [ -z "$phrase" ] && continue
+            if has_str "$phrase"; then
+              fail "index.html contains policy prose (\"${phrase}\"). The canonical policy is ${CANONICAL} — do not restate it here."
+            fi
+          done <<'PHRASES'
+          What we collect
+          How we use your data
+          Who we share it with
+          How long we keep it
+          Your rights
+          Legal basis
+          UK GDPR
+          data controller
+          Last updated
+          Leaderboards
+          International transfers
+          Information Commissioner
+          personal data
+          age verified
+          date of birth
+          PHRASES
+
+          # ── 4. No document structure ───────────────────────────────────────
+          # A heading tree means a document. A redirect has one <h1> and no
+          # sections under it.
+          if has_re '<h[2-6][ >]'; then
+            fail "index.html has sub-headings; a redirect page has none."
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo ""
+            echo "This repository is a redirect to the single canonical Cadet AI privacy"
+            echo "policy (audit finding M-10). A second published policy that drifts from"
+            echo "the canonical one is two competing normative texts for an app used by"
+            echo "children. Edit ${CANONICAL} in the website repo instead."
+            exit 1
+          fi
+
+          echo "OK: index.html is a redirect to ${CANONICAL} and carries no policy prose."
+
+      - name: Assert the README still points at the canonical policy
+        run: |
+          set -euo pipefail
+          # The README is allowed — and expected — to NAME the things that went
+          # wrong, so the phrase list above would be wrong applied here. What it
+          # must not do is become the policy: it has to keep pointing at the
+          # canonical URL so a reader who lands in this repo is sent onward.
+          README=$(cat README.md)
+          if [[ $README != *"https://cadetai.co.uk/privacy.html"* ]]; then
+            echo "::error file=README.md::README.md must name the canonical policy URL https://cadetai.co.uk/privacy.html"
+            exit 1
+          fi
+          echo "OK: README.md points at the canonical policy."
